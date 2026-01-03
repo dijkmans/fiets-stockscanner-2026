@@ -1,3 +1,5 @@
 tesseract-ocr
 
 libtesseract-dev
+
+libzbar0
