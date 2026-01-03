@@ -8,11 +8,7 @@ from datetime import datetime
 # -------------------------------------------------
 # Pagina instellingen
 # -------------------------------------------------
-st.set_page_config(
-    page_title="Stocktelling 2026",
-    layout="centered"
-)
-
+st.set_page_config(page_title="Stocktelling 2026", layout="centered")
 st.title("🚲 Stocktelling Tool")
 
 # -------------------------------------------------
@@ -25,15 +21,34 @@ uploaded_file = st.file_uploader(
     type=["xlsx", "csv"]
 )
 
-@st.cache_data(show_spinner=False)
-def load_stock_from_upload(file, filename):
-    if filename.endswith(".csv"):
+@st.cache_data
+def load_stock_from_upload(file):
+    # Inlezen
+    if file.name.lower().endswith(".csv"):
         df = pd.read_csv(file)
     else:
         df = pd.read_excel(file)
 
-    # ID altijd als string behandelen
+    # Kolomnamen opschonen
+    df.columns = (
+        df.columns
+        .astype(str)
+        .str.strip()
+        .str.upper()
+    )
+
+    # Verwachte kolommen
+    required_columns = ["ID", "MERK", "TYPE"]
+    missing = [c for c in required_columns if c not in df.columns]
+
+    if missing:
+        raise ValueError(
+            f"Ontbrekende kolommen in stocklijst: {', '.join(missing)}"
+        )
+
+    # ID opschonen
     df["ID"] = df["ID"].astype(str).str.strip()
+
     return df
 
 if uploaded_file is None:
@@ -41,29 +56,22 @@ if uploaded_file is None:
     st.stop()
 
 try:
-    df_stock = load_stock_from_upload(uploaded_file, uploaded_file.name)
+    df_stock = load_stock_from_upload(uploaded_file)
     st.success(f"Stocklijst geladen: {len(df_stock)} items")
 except Exception as e:
     st.error(f"Fout bij laden stocklijst: {e}")
     st.stop()
 
 # -------------------------------------------------
-# 2. Session state initialisatie
+# 2. Session state
 # -------------------------------------------------
 if "telling_log" not in st.session_state:
     st.session_state.telling_log = pd.DataFrame(
-        columns=[
-            "Tijdstip",
-            "ID",
-            "Merk",
-            "Type",
-            "Locatie",
-            "Detail"
-        ]
+        columns=["Tijdstip", "ID", "Merk", "Type", "Locatie", "Detail"]
     )
 
 # -------------------------------------------------
-# 3. Configuratie
+# 3. Locatie & detail
 # -------------------------------------------------
 st.subheader("📍 Locatie")
 
@@ -78,7 +86,7 @@ detail = st.text_input(
 )
 
 # -------------------------------------------------
-# 4. Camera / Scanner
+# 4. Scanner
 # -------------------------------------------------
 st.subheader("📸 Scan fiets-ID")
 
@@ -96,10 +104,10 @@ if img_file:
         info = df_stock[df_stock["ID"] == fiets_id]
 
         if not info.empty:
-            merk = info.iloc[0]["Merk"]
-            ftype = info.iloc[0]["Type"]
+            merk = info.iloc[0]["MERK"]
+            ftype = info.iloc[0]["TYPE"]
 
-            st.info(f"**Gevonden:** {merk} – {ftype} (ID: {fiets_id})")
+            st.info(f"**Gevonden:** {merk} - {ftype} (ID: {fiets_id})")
 
             if st.button("✅ Bevestig & sla op"):
                 nieuw_item = {
@@ -112,10 +120,7 @@ if img_file:
                 }
 
                 st.session_state.telling_log = pd.concat(
-                    [
-                        st.session_state.telling_log,
-                        pd.DataFrame([nieuw_item]),
-                    ],
+                    [st.session_state.telling_log, pd.DataFrame([nieuw_item])],
                     ignore_index=True,
                 )
 
@@ -131,10 +136,7 @@ if img_file:
 st.divider()
 st.subheader("📊 Tellingsoverzicht")
 
-st.dataframe(
-    st.session_state.telling_log,
-    use_container_width=True
-)
+st.dataframe(st.session_state.telling_log, use_container_width=True)
 
 if not st.session_state.telling_log.empty:
     csv = st.session_state.telling_log.to_csv(index=False).encode("utf-8")
