@@ -5,72 +5,129 @@ import pytesseract
 import re
 from datetime import datetime
 
-# Instellingen
+# Pagina instellingen
 st.set_page_config(page_title="Stocktelling 2026", layout="centered")
-
-# 1. Data laden
-@st.cache_data
-def load_stock():
-    try:
-        # Exacte naam van jouw bestand
-        df = pd.read_csv("Tweewielers-03-01-2026.xlsx - data.csv")
-        df['ID'] = df['ID'].astype(str).str.strip()
-        return df
-    except Exception as e:
-        st.error(f"Bestand niet gevonden: {e}")
-        return pd.DataFrame()
-
-df_stock = load_stock()
-
-if 'telling_log' not in st.session_state:
-    st.session_state.telling_log = pd.DataFrame(columns=["Tijdstip", "ID", "Merk", "Type", "Locatie", "Detail"])
 
 st.title("🚲 Stocktelling Tool")
 
-# 2. Configuratie
-locatie = st.selectbox("Locatie", ["GEEL", "MOL", "BOCHOLT", "STRUCTABO", "HERSELT"])
-detail = st.text_input("Detail (bijv. Rij of Box)", placeholder="Rij 1")
+# -----------------------------
+# 1. Stocklijst uploaden
+# -----------------------------
+st.subheader("📄 Stocklijst uploaden")
 
-# 3. Scanner
+uploaded_file = st.file_uploader(
+    "Upload je stocklijst (Excel of CSV)",
+    type=["xlsx", "csv"]
+)
+
+@st.cache_data
+def load_stock_from_upload(file):
+    if file.name.endswith(".csv"):
+        df = pd.read_csv(file)
+    else:
+        df = pd.read_excel(file)
+
+    df["ID"] = df["ID"].astype(str).str.strip()
+    return df
+
+if uploaded_file is None:
+    st.warning("Upload eerst een stocklijst om te starten.")
+    st.stop()
+
+try:
+    df_stock = load_stock_from_upload(uploaded_file)
+    st.success(f"Stocklijst geladen: {len(df_stock)} items")
+except Exception as e:
+    st.error(f"Fout bij laden stocklijst: {e}")
+    st.stop()
+
+# -----------------------------
+# 2. Session state init
+# -----------------------------
+if "telling_log" not in st.session_state:
+    st.session_state.telling_log = pd.DataFrame(
+        columns=["Tijdstip", "ID", "Merk", "Type", "Locatie", "Detail"]
+    )
+
+# -----------------------------
+# 3. Configuratie
+# -----------------------------
+st.subheader("📍 Locatie")
+
+locatie = st.selectbox(
+    "Locatie",
+    ["GEEL", "MOL", "BOCHOLT", "STRUCTABO", "HERSELT"]
+)
+
+detail = st.text_input(
+    "Detail (bijv. Rij of Box)",
+    placeholder="Rij 1"
+)
+
+# -----------------------------
+# 4. Camera / Scanner
+# -----------------------------
+st.subheader("📸 Scan fiets-ID")
+
 img_file = st.camera_input("Maak een foto van de code")
 
 if img_file:
     img = Image.open(img_file)
-    
-    with st.spinner('Code zoeken...'):
-        # OCR via pytesseract (lichter voor Vercel)
+
+    with st.spinner("Code zoeken..."):
         text = pytesseract.image_to_string(img)
-        match = re.search(r'\b\d{5}\b', text)
-    
+        match = re.search(r"\b\d{5}\b", text)
+
     if match:
         fiets_id = match.group(0)
-        info = df_stock[df_stock['ID'] == fiets_id]
-        
+        info = df_stock[df_stock["ID"] == fiets_id]
+
         if not info.empty:
-            merk = info.iloc[0]['Merk']
-            ftype = info.iloc[0]['Type']
+            merk = info.iloc[0]["Merk"]
+            ftype = info.iloc[0]["Type"]
+
             st.info(f"**Gevonden:** {merk} - {ftype} (ID: {fiets_id})")
-            
-            if st.button("✅ Bevestig & Sla op"):
+
+            if st.button("✅ Bevestig & sla op"):
                 nieuw_item = {
-                    "Tijdstip": datetime.now().strftime("%H:%M:%S"),
+                    "Tijdstip": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                     "ID": fiets_id,
                     "Merk": merk,
                     "Type": ftype,
                     "Locatie": locatie,
-                    "Detail": detail
+                    "Detail": detail,
                 }
-                st.session_state.telling_log = pd.concat([st.session_state.telling_log, pd.DataFrame([nieuw_item])], ignore_index=True)
+
+                st.session_state.telling_log = pd.concat(
+                    [
+                        st.session_state.telling_log,
+                        pd.DataFrame([nieuw_item]),
+                    ],
+                    ignore_index=True,
+                )
+
                 st.success(f"Fiets {fiets_id} opgeslagen.")
         else:
-            st.error(f"ID {fiets_id} niet in stocklijst.")
+            st.error(f"ID {fiets_id} niet gevonden in stocklijst.")
     else:
         st.error("Geen 5-cijferige code herkend. Probeer scherper te focussen.")
 
-# 4. Tabel en Download
+# -----------------------------
+# 5. Overzicht & download
+# -----------------------------
 st.divider()
-st.dataframe(st.session_state.telling_log, use_container_width=True)
+st.subheader("📊 Tellingsoverzicht")
+
+st.dataframe(
+    st.session_state.telling_log,
+    use_container_width=True
+)
 
 if not st.session_state.telling_log.empty:
-    csv = st.session_state.telling_log.to_csv(index=False).encode('utf-8')
-    st.download_button("📥 Download Telling", data=csv, file_name=f"telling_{locatie}.csv", mime='text/csv')
+    csv = st.session_state.telling_log.to_csv(index=False).encode("utf-8")
+    st.download_button(
+        "📥 Download telling",
+        data=csv,
+        file_name=f"telling_{locatie}.csv",
+        mime="text/csv",
+    )
