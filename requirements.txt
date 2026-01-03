@@ -1,11 +1,4 @@
 streamlit
 pandas
-pillow
-pytesseract
-openpyxl
-
 supabase
-
-pyzbar
-
-opencv-python-headless
+google-cloud-vision
