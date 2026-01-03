@@ -5,14 +5,19 @@ import pytesseract
 import re
 from datetime import datetime
 
+# -------------------------------------------------
 # Pagina instellingen
-st.set_page_config(page_title="Stocktelling 2026", layout="centered")
+# -------------------------------------------------
+st.set_page_config(
+    page_title="Stocktelling 2026",
+    layout="centered"
+)
 
 st.title("🚲 Stocktelling Tool")
 
-# -----------------------------
+# -------------------------------------------------
 # 1. Stocklijst uploaden
-# -----------------------------
+# -------------------------------------------------
 st.subheader("📄 Stocklijst uploaden")
 
 uploaded_file = st.file_uploader(
@@ -20,13 +25,14 @@ uploaded_file = st.file_uploader(
     type=["xlsx", "csv"]
 )
 
-@st.cache_data
-def load_stock_from_upload(file):
-    if file.name.endswith(".csv"):
+@st.cache_data(show_spinner=False)
+def load_stock_from_upload(file, filename):
+    if filename.endswith(".csv"):
         df = pd.read_csv(file)
     else:
         df = pd.read_excel(file)
 
+    # ID altijd als string behandelen
     df["ID"] = df["ID"].astype(str).str.strip()
     return df
 
@@ -35,23 +41,30 @@ if uploaded_file is None:
     st.stop()
 
 try:
-    df_stock = load_stock_from_upload(uploaded_file)
+    df_stock = load_stock_from_upload(uploaded_file, uploaded_file.name)
     st.success(f"Stocklijst geladen: {len(df_stock)} items")
 except Exception as e:
     st.error(f"Fout bij laden stocklijst: {e}")
     st.stop()
 
-# -----------------------------
-# 2. Session state init
-# -----------------------------
+# -------------------------------------------------
+# 2. Session state initialisatie
+# -------------------------------------------------
 if "telling_log" not in st.session_state:
     st.session_state.telling_log = pd.DataFrame(
-        columns=["Tijdstip", "ID", "Merk", "Type", "Locatie", "Detail"]
+        columns=[
+            "Tijdstip",
+            "ID",
+            "Merk",
+            "Type",
+            "Locatie",
+            "Detail"
+        ]
     )
 
-# -----------------------------
+# -------------------------------------------------
 # 3. Configuratie
-# -----------------------------
+# -------------------------------------------------
 st.subheader("📍 Locatie")
 
 locatie = st.selectbox(
@@ -64,9 +77,9 @@ detail = st.text_input(
     placeholder="Rij 1"
 )
 
-# -----------------------------
+# -------------------------------------------------
 # 4. Camera / Scanner
-# -----------------------------
+# -------------------------------------------------
 st.subheader("📸 Scan fiets-ID")
 
 img_file = st.camera_input("Maak een foto van de code")
@@ -86,7 +99,7 @@ if img_file:
             merk = info.iloc[0]["Merk"]
             ftype = info.iloc[0]["Type"]
 
-            st.info(f"**Gevonden:** {merk} - {ftype} (ID: {fiets_id})")
+            st.info(f"**Gevonden:** {merk} – {ftype} (ID: {fiets_id})")
 
             if st.button("✅ Bevestig & sla op"):
                 nieuw_item = {
@@ -112,9 +125,9 @@ if img_file:
     else:
         st.error("Geen 5-cijferige code herkend. Probeer scherper te focussen.")
 
-# -----------------------------
+# -------------------------------------------------
 # 5. Overzicht & download
-# -----------------------------
+# -------------------------------------------------
 st.divider()
 st.subheader("📊 Tellingsoverzicht")
 
