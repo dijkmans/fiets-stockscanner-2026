@@ -3,3 +3,9 @@ tesseract-ocr
 libtesseract-dev
 
 libzbar0
+
+libgl1
+libglib2.0-0
+
+libgl1
+libglib2.0-0
