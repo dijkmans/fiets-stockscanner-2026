@@ -5,20 +5,33 @@
 import os
 import io
 import re
-import time
 from datetime import datetime
 
 import streamlit as st
 import pandas as pd
 from supabase import create_client, Client
 from google.cloud import vision
+from dotenv import load_dotenv
 
 
 # =========================================================
-# 0. GOOGLE OCR CONFIGURATIE
+# 0. ENV + GOOGLE OCR CONFIG
 # =========================================================
-# JSON key moet in dezelfde map staan als app.py
-os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = "fiets-scanner-key.json"
+load_dotenv()
+
+GOOGLE_CREDENTIALS_FILE = os.getenv("GOOGLE_APPLICATION_CREDENTIALS")
+SUPABASE_URL = os.getenv("SUPABASE_URL")
+SUPABASE_KEY = os.getenv("SUPABASE_KEY")
+
+if not GOOGLE_CREDENTIALS_FILE:
+    st.error("GOOGLE_APPLICATION_CREDENTIALS ontbreekt in .env")
+    st.stop()
+
+if not SUPABASE_URL or not SUPABASE_KEY:
+    st.error("SUPABASE_URL of SUPABASE_KEY ontbreekt in .env")
+    st.stop()
+
+os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = GOOGLE_CREDENTIALS_FILE
 
 
 # =========================================================
@@ -35,30 +48,21 @@ st.title("🚲 Stocktelling + Controle")
 # =========================================================
 # 2. SUPABASE CONNECTIE
 # =========================================================
-SUPABASE_URL = "https://ubgyxilkcmzvtpxresos.supabase.co"
-SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InViZ3l4aWxrY216dnRweHJlc29zIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc2NzQzOTM1NiwiZXhwIjoyMDgzMDE1MzU2fQ.EhllRUxKxjcXFt3bSbiV0gs2v9LNLvn6aOeVkkZFviY"
-
 try:
     supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 except Exception as e:
-    st.error(f"❌ Database fout: {e}")
+    st.error("Databaseverbinding mislukt")
+    st.write(e)
     st.stop()
 
 
 # =========================================================
 # 3. SESSION STATE
 # =========================================================
-if "scan_result" not in st.session_state:
-    st.session_state.scan_result = None
-
-if "unknown_items" not in st.session_state:
-    st.session_state.unknown_items = []
-
-if "success_msg" not in st.session_state:
-    st.session_state.success_msg = None
-
-if "input_field" not in st.session_state:
-    st.session_state.input_field = ""
+st.session_state.setdefault("scan_result", None)
+st.session_state.setdefault("unknown_items", [])
+st.session_state.setdefault("success_msg", None)
+st.session_state.setdefault("input_field", "")
 
 
 # =========================================================
@@ -68,7 +72,7 @@ with st.expander("⚙️ Instellingen", expanded=False):
     col1, col2 = st.columns(2)
     with col1:
         filiaal = st.selectbox("Filiaal", ["GEEL", "MOL", "HERSELT", "BOCHOLT"])
-        scanner_naam = st.text_input("Jouw naam", value="Piet")
+        scanner_naam = st.text_input("Jouw naam", value="")
     with col2:
         locatie = st.text_input("Locatie (bv. Kelder)")
 
@@ -76,21 +80,21 @@ with st.expander("⚙️ Instellingen", expanded=False):
 # =========================================================
 # 5. OCR FUNCTIE
 # =========================================================
-def lees_nummer_van_foto(image_bytes):
+def lees_nummer_van_foto(image_bytes: bytes) -> str | None:
     client = vision.ImageAnnotatorClient()
     image = vision.Image(content=image_bytes)
 
     response = client.text_detection(image=image)
 
     if response.error.message:
-        raise Exception(response.error.message)
+        raise RuntimeError(response.error.message)
 
     if not response.text_annotations:
         return None
 
-    volledige_tekst = response.text_annotations[0].description
+    tekst = response.text_annotations[0].description
+    cijfers = re.findall(r"\d+", tekst)
 
-    cijfers = re.findall(r"\d+", volledige_tekst)
     if not cijfers:
         return None
 
@@ -98,17 +102,14 @@ def lees_nummer_van_foto(image_bytes):
 
 
 # =========================================================
-# 6. ZOEKLOGICA
+# 6. ZOEK + VERWERKING
 # =========================================================
 def zoek_fiets():
-    raw = st.session_state.input_field
+    raw = st.session_state.input_field.strip()
     if not raw:
         return
 
-    clean = raw.upper().replace(" ", "").replace(".", "").replace("€", "")
-    cijfers = re.findall(r"\d+", clean)
-    if cijfers:
-        clean = max(cijfers, key=len)
+    clean = re.sub(r"\D", "", raw)
 
     try:
         resp = supabase.table("stock").select("*").eq("fietsnummer", clean).execute()
@@ -124,10 +125,11 @@ def zoek_fiets():
                 "nummer": clean
             }
     except Exception as e:
-        st.error(f"Fout: {e}")
+        st.error("Zoekfout")
+        st.write(e)
 
 
-def annuleer():
+def reset_scan():
     st.session_state.scan_result = None
     st.session_state.input_field = ""
 
@@ -146,7 +148,7 @@ def verwerk_bekend():
     }).eq("fietsnummer", res["nummer"]).execute()
 
     st.session_state.success_msg = f"✅ {res['nummer']} opgeslagen"
-    annuleer()
+    reset_scan()
 
 
 def verwerk_onbekend():
@@ -157,7 +159,7 @@ def verwerk_onbekend():
     st.session_state.unknown_items.insert(0, {
         "fietsnummer": res["nummer"],
         "gescand": True,
-        "gescand_op": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "gescand_op": datetime.utcnow().isoformat(),
         "gescand_door": scanner_naam,
         "filiaal": filiaal,
         "locatie": locatie,
@@ -165,7 +167,7 @@ def verwerk_onbekend():
     })
 
     st.session_state.success_msg = f"⚠️ {res['nummer']} toegevoegd"
-    annuleer()
+    reset_scan()
 
 
 # =========================================================
@@ -183,8 +185,6 @@ with tab_scan:
         st.success(st.session_state.success_msg)
         st.session_state.success_msg = None
 
-    st.subheader("📷 Scan via foto")
-
     foto = st.camera_input("Neem foto van label")
 
     if foto:
@@ -194,16 +194,15 @@ with tab_scan:
                 st.session_state.input_field = nummer
                 zoek_fiets()
             else:
-                st.warning("Geen nummer gevonden op de foto")
+                st.warning("Geen nummer gevonden")
         except Exception as e:
-            st.error(f"OCR fout: {e}")
+            st.error("OCR fout")
+            st.write(e)
 
     st.divider()
 
-    st.info("Of typ / scan manueel en druk op ENTER")
-
     st.text_input(
-        "Nummer",
+        "Nummer (manueel)",
         key="input_field",
         on_change=zoek_fiets
     )
@@ -214,34 +213,32 @@ with tab_scan:
 
         if res["status"] == "found":
             fiets = res["data"]
-            titel = f"{fiets.get('merk','')} {fiets.get('model','')} {fiets.get('kleur','')} {fiets.get('maat','')}".strip()
+            titel = f"{fiets.get('merk','')} {fiets.get('model','')} {fiets.get('maat','')}".strip()
 
             col1, col2 = st.columns([3, 1])
             with col1:
-                st.subheader(f"🚲 {titel or 'Onbekend'}")
+                st.subheader(titel or "Onbekende fiets")
                 st.caption(f"Nummer: {res['nummer']}")
                 if fiets.get("gescand"):
-                    st.warning(f"Al geteld door {fiets.get('gescand_door')}")
+                    st.warning(f"Al gescand door {fiets.get('gescand_door')}")
 
             with col2:
                 st.button("✅ OPSLAAN", use_container_width=True, on_click=verwerk_bekend)
-                st.button("❌ ANNULEER", use_container_width=True, on_click=annuleer)
+                st.button("❌ ANNULEER", use_container_width=True, on_click=reset_scan)
 
         else:
-            st.warning(f"⚠️ Nummer {res['nummer']} niet in database")
+            st.warning(f"{res['nummer']} niet in database")
             col1, col2 = st.columns(2)
             with col1:
-                st.button("✅ TOCH TOEVOEGEN", use_container_width=True, on_click=verwerk_onbekend)
+                st.button("✅ TOEVOEGEN", use_container_width=True, on_click=verwerk_onbekend)
             with col2:
-                st.button("❌ NEGEREN", use_container_width=True, on_click=annuleer)
+                st.button("❌ NEGEREN", use_container_width=True, on_click=reset_scan)
 
 
 # =========================================================
 # TAB 2 – EXCEL
 # =========================================================
 with tab_excel:
-    st.header("Excel beheer")
-
     col1, col2 = st.columns(2)
 
     with col1:
@@ -249,14 +246,13 @@ with tab_excel:
             resp = supabase.table("stock").select("*").execute()
             df_db = pd.DataFrame(resp.data)
             df_unk = pd.DataFrame(st.session_state.unknown_items)
-
-            df_final = pd.concat([df_db, df_unk], ignore_index=True) if not df_unk.empty else df_db
+            df_final = pd.concat([df_db, df_unk], ignore_index=True)
 
             buffer = io.BytesIO()
             with pd.ExcelWriter(buffer, engine="xlsxwriter") as writer:
                 df_final.to_excel(writer, index=False)
 
-            st.download_button("Download Excel", buffer, "totaal.xlsx")
+            st.download_button("Download Excel", buffer, "stocktelling.xlsx")
 
     with col2:
         upload = st.file_uploader("Nieuwe lijst uploaden", type=["xlsx"])
@@ -264,14 +260,17 @@ with tab_excel:
             df = pd.read_excel(upload)
             df.columns = [c.lower() for c in df.columns]
 
-            if "fietsnummer" in df.columns:
-                bar = st.progress(0)
+            if "fietsnummer" not in df.columns:
+                st.error("Kolom 'fietsnummer' ontbreekt")
+            else:
+                bar = st.progress(0.0)
                 for i, row in df.iterrows():
                     data = row.to_dict()
                     data["fietsnummer"] = str(data["fietsnummer"])
                     data["gescand"] = False
-                    supabase.table("stock").upsert(data, on_conflict="fietsnummer").execute()
-                    if i % 10 == 0:
-                        bar.progress(i / len(df))
-                bar.progress(1.0)
+                    supabase.table("stock").upsert(
+                        data,
+                        on_conflict="fietsnummer"
+                    ).execute()
+                    bar.progress((i + 1) / len(df))
                 st.success("Import klaar")
