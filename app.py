@@ -1,169 +1,276 @@
+# =========================================================
+# STOCKTELLING PRO – MET GOOGLE OCR
+# =========================================================
+
+import os
+import io
+import re
+from datetime import datetime
+
 import streamlit as st
 import pandas as pd
-import pytesseract
-from PIL import Image
-from datetime import datetime
-import os
-import re
-from io import BytesIO
 from supabase import create_client, Client
+from google.cloud import vision
+from dotenv import load_dotenv
 
-# ============================
-# 1. INITIALISATIE (MET GROTE VERSIE-CHECK)
-# ============================
-st.set_page_config(page_title="Stocktelling Tool 2026", layout="wide")
 
-# --- DEZE BALK MOET JE ZIEN OM ZEKER TE ZIJN ---
-st.error("🔴 VERSIE CHECK: ZATERDAG 17:15 - ALS JE DIT ZIET, IS DE UPDATE GELUKT! 🔴")
+# =========================================================
+# 0. ENV + GOOGLE OCR CONFIG
+# =========================================================
+load_dotenv()
 
-st.title("🚲 Stocktelling Tool")
+GOOGLE_CREDENTIALS_FILE = os.getenv("GOOGLE_APPLICATION_CREDENTIALS")
+SUPABASE_URL = os.getenv("SUPABASE_URL")
+SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 
-# --- CONFIGURATIE (JOUW ECHTE GEGEVENS) ---
-SUPABASE_URL = "https://ubgyxilkcmzvtpxresos.supabase.co"
-SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InViZ3l4aWxrY216dnRweHJlc29zIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc2NzQzOTM1NiwiZXhwIjoyMDgzMDE1MzU2fQ.EhllRUxKxjcXFt3bSbiV0gs2v9LNLvn6aOeVkkZFviY"
-
-if not SUPABASE_URL or not SUPABASE_KEY:
-    st.error("⚠️ Configuratie-fout: URL of KEY ontbreekt.")
+if not GOOGLE_CREDENTIALS_FILE:
+    st.error("GOOGLE_APPLICATION_CREDENTIALS ontbreekt in .env")
     st.stop()
 
+if not SUPABASE_URL or not SUPABASE_KEY:
+    st.error("SUPABASE_URL of SUPABASE_KEY ontbreekt in .env")
+    st.stop()
+
+os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = GOOGLE_CREDENTIALS_FILE
+
+
+# =========================================================
+# 1. PAGINA INSTELLINGEN
+# =========================================================
+st.set_page_config(
+    page_title="Stocktelling Pro",
+    layout="wide",
+    initial_sidebar_state="collapsed"
+)
+st.title("🚲 Stocktelling + Controle")
+
+
+# =========================================================
+# 2. SUPABASE CONNECTIE
+# =========================================================
 try:
     supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 except Exception as e:
-    st.error("❌ Kan geen verbinding maken met de database client.")
+    st.error("Databaseverbinding mislukt")
     st.write(e)
     st.stop()
 
-# --- STATUS CHECK ---
-try:
-    count_result = supabase.table("stock").select("fietsnummer", count="exact", head=True).execute()
-    aantal_in_db = count_result.count
-    
-    if aantal_in_db is not None and aantal_in_db > 0:
-        st.success(f"✅ Systeem is online. Huidige voorraad in database: **{aantal_in_db} fietsen**.")
-    else:
-        st.warning("⚠️ De database is nog leeg. Upload hieronder je eerste stocklijst.")
-except Exception:
-    st.warning("Kon database-status niet ophalen.")
 
-# ============================
-# 2. EXCEL UPLOAD
-# ============================
-st.header("📄 Stap 1: Voorraadlijst inladen")
+# =========================================================
+# 3. SESSION STATE
+# =========================================================
+st.session_state.setdefault("scan_result", None)
+st.session_state.setdefault("unknown_items", [])
+st.session_state.setdefault("success_msg", None)
+st.session_state.setdefault("input_field", "")
 
-uploaded_file = st.file_uploader("Upload de systeem-dump (Excel of CSV)", type=["xlsx", "csv"])
 
-if uploaded_file:
+# =========================================================
+# 4. INSTELLINGEN
+# =========================================================
+with st.expander("⚙️ Instellingen", expanded=False):
+    col1, col2 = st.columns(2)
+    with col1:
+        filiaal = st.selectbox("Filiaal", ["GEEL", "MOL", "HERSELT", "BOCHOLT"])
+        scanner_naam = st.text_input("Jouw naam", value="")
+    with col2:
+        locatie = st.text_input("Locatie (bv. Kelder)")
+
+
+# =========================================================
+# 5. OCR FUNCTIE
+# =========================================================
+def lees_nummer_van_foto(image_bytes: bytes) -> str | None:
+    client = vision.ImageAnnotatorClient()
+    image = vision.Image(content=image_bytes)
+
+    response = client.text_detection(image=image)
+
+    if response.error.message:
+        raise RuntimeError(response.error.message)
+
+    if not response.text_annotations:
+        return None
+
+    tekst = response.text_annotations[0].description
+    cijfers = re.findall(r"\d+", tekst)
+
+    if not cijfers:
+        return None
+
+    return max(cijfers, key=len)
+
+
+# =========================================================
+# 6. ZOEK + VERWERKING
+# =========================================================
+def zoek_fiets():
+    raw = st.session_state.input_field.strip()
+    if not raw:
+        return
+
+    clean = re.sub(r"\D", "", raw)
+
     try:
-        if uploaded_file.name.lower().endswith(".csv"):
-            df = pd.read_csv(uploaded_file)
+        resp = supabase.table("stock").select("*").eq("fietsnummer", clean).execute()
+        if resp.data:
+            st.session_state.scan_result = {
+                "status": "found",
+                "nummer": clean,
+                "data": resp.data[0]
+            }
         else:
-            df = pd.read_excel(uploaded_file)
-
-        df.columns = [str(c).strip().lower() for c in df.columns]
-        
-        st.info(f"Bestand geladen met {len(df)} rijen. Beschikbare kolommen: {', '.join(df.columns)}")
-
-        if st.button("📥 Start Import naar Supabase"):
-            with st.spinner("Database controleren en data uploaden..."):
-                try:
-                    bestaande_data = supabase.table("stock").select("fietsnummer").execute().data
-                    bestaande_nrs = {str(r["fietsnummer"]) for r in (bestaande_data or [])}
-                except Exception as db_err:
-                    st.error("❌ Kan tabel niet lezen.")
-                    st.stop()
-
-                nieuw = []
-                for _, row in df.iterrows():
-                    raw_nr = row.get("fietsnr") or row.get("fietsnummer") or row.get("fiets_nr")
-                    if pd.isna(raw_nr): continue
-                    
-                    fietsnummer = str(raw_nr).split('.')[0].strip()
-
-                    if fietsnummer and fietsnummer not in bestaande_nrs:
-                        nieuw.append({
-                            "fietsnummer": fietsnummer,
-                            "merk": str(row.get("merk", "")).strip(),
-                            "model": str(row.get("model", "")).strip(),
-                            "maat": str(row.get("maat", "")).strip(),
-                            "gescand": False
-                        })
-
-                if nieuw:
-                    try:
-                        for i in range(0, len(nieuw), 100):
-                            batch = nieuw[i:i+100]
-                            supabase.table("stock").insert(batch).execute()
-                        st.success(f"✅ Succes! {len(nieuw)} fietsen toegevoegd.")
-                        import time
-                        time.sleep(1)
-                        st.rerun() 
-                    except Exception as ins_err:
-                        st.error("❌ Fout bij schrijven.")
-                else:
-                    st.info("Geen nieuwe fietsen gevonden.")
-
+            st.session_state.scan_result = {
+                "status": "unknown",
+                "nummer": clean
+            }
     except Exception as e:
-        st.error("Fout bij bestand.")
+        st.error("Zoekfout")
+        st.write(e)
 
-# ============================
-# 3. SCANNER INTERFACE
-# ============================
-st.divider()
-st.header("📸 Stap 2: Fietsen scannen")
 
-col1, col2 = st.columns(2)
-with col1:
-    filiaal = st.selectbox("Filiaal", ["GEEL", "MOL", "HERSELT", "BOCHOLT"])
-    scanner_naam = st.text_input("Naam van de teller")
-with col2:
-    locatie = st.text_input("Locatie")
+def reset_scan():
+    st.session_state.scan_result = None
+    st.session_state.input_field = ""
 
-foto = st.camera_input("Maak een foto")
 
-def extract_fietsnummer(text):
-    text = text.upper()
-    matches = re.findall(r"[A-Z0-9\-]{4,}", text)
-    return matches[0] if matches else ""
+def verwerk_bekend():
+    res = st.session_state.scan_result
+    if not res:
+        return
 
-if foto:
-    img = Image.open(foto)
-    raw_text = pytesseract.image_to_string(img)
-    herkend_nr = extract_fietsnummer(raw_text)
+    supabase.table("stock").update({
+        "gescand": True,
+        "gescand_op": datetime.utcnow().isoformat(),
+        "gescand_door": scanner_naam,
+        "filiaal": filiaal,
+        "locatie": locatie
+    }).eq("fietsnummer", res["nummer"]).execute()
 
-    st.subheader(f"🔍 Herkend: {herkend_nr}")
+    st.session_state.success_msg = f"✅ {res['nummer']} opgeslagen"
+    reset_scan()
 
-    if herkend_nr and scanner_naam and locatie:
-        if st.button("✅ Bevestig scan"):
-            try:
-                res = supabase.table("stock").update({
-                    "gescand": True,
-                    "gescand_op": datetime.utcnow().isoformat(),
-                    "gescand_door": scanner_naam,
-                    "filiaal": filiaal,
-                    "locatie": locatie
-                }).eq("fietsnummer", herkend_nr).execute()
 
-                if res.data:
-                    st.success("Opgeslagen!")
-                else:
-                    st.error("Nummer niet in database.")
-            except Exception as e:
-                st.error("Fout bij opslaan.")
+def verwerk_onbekend():
+    res = st.session_state.scan_result
+    if not res:
+        return
 
-# ============================
-# 4. OVERZICHT
-# ============================
-st.divider()
-st.header("📊 Stap 3: Status")
+    st.session_state.unknown_items.insert(0, {
+        "fietsnummer": res["nummer"],
+        "gescand": True,
+        "gescand_op": datetime.utcnow().isoformat(),
+        "gescand_door": scanner_naam,
+        "filiaal": filiaal,
+        "locatie": locatie,
+        "status": "NIET IN LIJST"
+    })
 
-if st.button("🔄 Ververs"):
-    st.rerun()
+    st.session_state.success_msg = f"⚠️ {res['nummer']} toegevoegd"
+    reset_scan()
 
-try:
-    res_all = supabase.table("stock").select("*").execute()
-    if res_all.data:
-        df_status = pd.DataFrame(res_all.data)
-        st.metric("Totaal Gescand", df_status['gescand'].sum())
-        st.dataframe(df_status, use_container_width=True)
-except:
-    pass
+
+# =========================================================
+# 7. TABS
+# =========================================================
+tab_scan, tab_excel = st.tabs(["📷 SCANNER", "📊 EXCEL"])
+
+
+# =========================================================
+# TAB 1 – SCANNER
+# =========================================================
+with tab_scan:
+
+    if st.session_state.success_msg:
+        st.success(st.session_state.success_msg)
+        st.session_state.success_msg = None
+
+    foto = st.camera_input("Neem foto van label")
+
+    if foto:
+        try:
+            nummer = lees_nummer_van_foto(foto.getvalue())
+            if nummer:
+                st.session_state.input_field = nummer
+                zoek_fiets()
+            else:
+                st.warning("Geen nummer gevonden")
+        except Exception as e:
+            st.error("OCR fout")
+            st.write(e)
+
+    st.divider()
+
+    st.text_input(
+        "Nummer (manueel)",
+        key="input_field",
+        on_change=zoek_fiets
+    )
+
+    if st.session_state.scan_result:
+        res = st.session_state.scan_result
+        st.divider()
+
+        if res["status"] == "found":
+            fiets = res["data"]
+            titel = f"{fiets.get('merk','')} {fiets.get('model','')} {fiets.get('maat','')}".strip()
+
+            col1, col2 = st.columns([3, 1])
+            with col1:
+                st.subheader(titel or "Onbekende fiets")
+                st.caption(f"Nummer: {res['nummer']}")
+                if fiets.get("gescand"):
+                    st.warning(f"Al gescand door {fiets.get('gescand_door')}")
+
+            with col2:
+                st.button("✅ OPSLAAN", use_container_width=True, on_click=verwerk_bekend)
+                st.button("❌ ANNULEER", use_container_width=True, on_click=reset_scan)
+
+        else:
+            st.warning(f"{res['nummer']} niet in database")
+            col1, col2 = st.columns(2)
+            with col1:
+                st.button("✅ TOEVOEGEN", use_container_width=True, on_click=verwerk_onbekend)
+            with col2:
+                st.button("❌ NEGEREN", use_container_width=True, on_click=reset_scan)
+
+
+# =========================================================
+# TAB 2 – EXCEL
+# =========================================================
+with tab_excel:
+    col1, col2 = st.columns(2)
+
+    with col1:
+        if st.button("📥 Download resultaten"):
+            resp = supabase.table("stock").select("*").execute()
+            df_db = pd.DataFrame(resp.data)
+            df_unk = pd.DataFrame(st.session_state.unknown_items)
+            df_final = pd.concat([df_db, df_unk], ignore_index=True)
+
+            buffer = io.BytesIO()
+            with pd.ExcelWriter(buffer, engine="xlsxwriter") as writer:
+                df_final.to_excel(writer, index=False)
+
+            st.download_button("Download Excel", buffer, "stocktelling.xlsx")
+
+    with col2:
+        upload = st.file_uploader("Nieuwe lijst uploaden", type=["xlsx"])
+        if upload and st.button("🚀 Importeer"):
+            df = pd.read_excel(upload)
+            df.columns = [c.lower() for c in df.columns]
+
+            if "fietsnummer" not in df.columns:
+                st.error("Kolom 'fietsnummer' ontbreekt")
+            else:
+                bar = st.progress(0.0)
+                for i, row in df.iterrows():
+                    data = row.to_dict()
+                    data["fietsnummer"] = str(data["fietsnummer"])
+                    data["gescand"] = False
+                    supabase.table("stock").upsert(
+                        data,
+                        on_conflict="fietsnummer"
+                    ).execute()
+                    bar.progress((i + 1) / len(df))
+                st.success("Import klaar")
