@@ -1,37 +1,18 @@
 # =========================================================
-# STOCKTELLING PRO – MET GOOGLE OCR
+# STOCKTELLING PRO – STREAMLIT CLOUD + SUPABASE + GOOGLE OCR
 # =========================================================
 
-import os
 import io
 import re
+import json
 from datetime import datetime
 
 import streamlit as st
 import pandas as pd
+
 from supabase import create_client, Client
 from google.cloud import vision
-from dotenv import load_dotenv
-
-
-# =========================================================
-# 0. ENV + GOOGLE OCR CONFIG
-# =========================================================
-load_dotenv()
-
-GOOGLE_CREDENTIALS_FILE = os.getenv("GOOGLE_APPLICATION_CREDENTIALS")
-SUPABASE_URL = os.getenv("SUPABASE_URL")
-SUPABASE_KEY = os.getenv("SUPABASE_KEY")
-
-if not GOOGLE_CREDENTIALS_FILE:
-    st.error("GOOGLE_APPLICATION_CREDENTIALS ontbreekt in .env")
-    st.stop()
-
-if not SUPABASE_URL or not SUPABASE_KEY:
-    st.error("SUPABASE_URL of SUPABASE_KEY ontbreekt in .env")
-    st.stop()
-
-os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = GOOGLE_CREDENTIALS_FILE
+from google.oauth2 import service_account
 
 
 # =========================================================
@@ -46,18 +27,48 @@ st.title("🚲 Stocktelling + Controle")
 
 
 # =========================================================
-# 2. SUPABASE CONNECTIE
+# 2. SECRETS CONTROLE
+# =========================================================
+if "SUPABASE_URL" not in st.secrets or "SUPABASE_KEY" not in st.secrets:
+    st.error("Supabase secrets ontbreken")
+    st.stop()
+
+if "google" not in st.secrets or "credentials" not in st.secrets["google"]:
+    st.error("Google OCR secrets ontbreken")
+    st.stop()
+
+
+# =========================================================
+# 3. SUPABASE CONNECTIE
 # =========================================================
 try:
-    supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
+    supabase: Client = create_client(
+        st.secrets["SUPABASE_URL"],
+        st.secrets["SUPABASE_KEY"]
+    )
 except Exception as e:
-    st.error("Databaseverbinding mislukt")
+    st.error("Kan geen verbinding maken met Supabase")
     st.write(e)
     st.stop()
 
 
 # =========================================================
-# 3. SESSION STATE
+# 4. GOOGLE OCR CLIENT
+# =========================================================
+try:
+    credentials_info = json.loads(st.secrets["google"]["credentials"])
+    credentials = service_account.Credentials.from_service_account_info(
+        credentials_info
+    )
+    ocr_client = vision.ImageAnnotatorClient(credentials=credentials)
+except Exception as e:
+    st.error("Google OCR initialisatie mislukt")
+    st.write(e)
+    st.stop()
+
+
+# =========================================================
+# 5. SESSION STATE
 # =========================================================
 st.session_state.setdefault("scan_result", None)
 st.session_state.setdefault("unknown_items", [])
@@ -66,7 +77,7 @@ st.session_state.setdefault("input_field", "")
 
 
 # =========================================================
-# 4. INSTELLINGEN
+# 6. INSTELLINGEN
 # =========================================================
 with st.expander("⚙️ Instellingen", expanded=False):
     col1, col2 = st.columns(2)
@@ -78,13 +89,11 @@ with st.expander("⚙️ Instellingen", expanded=False):
 
 
 # =========================================================
-# 5. OCR FUNCTIE
+# 7. OCR FUNCTIE
 # =========================================================
 def lees_nummer_van_foto(image_bytes: bytes) -> str | None:
-    client = vision.ImageAnnotatorClient()
     image = vision.Image(content=image_bytes)
-
-    response = client.text_detection(image=image)
+    response = ocr_client.text_detection(image=image)
 
     if response.error.message:
         raise RuntimeError(response.error.message)
@@ -102,27 +111,27 @@ def lees_nummer_van_foto(image_bytes: bytes) -> str | None:
 
 
 # =========================================================
-# 6. ZOEK + VERWERKING
+# 8. ZOEK EN VERWERKING
 # =========================================================
 def zoek_fiets():
     raw = st.session_state.input_field.strip()
     if not raw:
         return
 
-    clean = re.sub(r"\D", "", raw)
+    nummer = re.sub(r"\D", "", raw)
 
     try:
-        resp = supabase.table("stock").select("*").eq("fietsnummer", clean).execute()
+        resp = supabase.table("stock").select("*").eq("fietsnummer", nummer).execute()
         if resp.data:
             st.session_state.scan_result = {
                 "status": "found",
-                "nummer": clean,
+                "nummer": nummer,
                 "data": resp.data[0]
             }
         else:
             st.session_state.scan_result = {
                 "status": "unknown",
-                "nummer": clean
+                "nummer": nummer
             }
     except Exception as e:
         st.error("Zoekfout")
@@ -171,7 +180,7 @@ def verwerk_onbekend():
 
 
 # =========================================================
-# 7. TABS
+# 9. TABS
 # =========================================================
 tab_scan, tab_excel = st.tabs(["📷 SCANNER", "📊 EXCEL"])
 
@@ -194,7 +203,7 @@ with tab_scan:
                 st.session_state.input_field = nummer
                 zoek_fiets()
             else:
-                st.warning("Geen nummer gevonden")
+                st.warning("Geen nummer gevonden op de foto")
         except Exception as e:
             st.error("OCR fout")
             st.write(e)
